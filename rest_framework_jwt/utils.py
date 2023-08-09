@@ -1,138 +1,112 @@
-import jwt
-import uuid
-import warnings
-
-from django.contrib.auth import get_user_model
-
-from calendar import timegm
 from datetime import datetime
 
-from rest_framework_jwt.compat import get_username
-from rest_framework_jwt.compat import get_username_field
-from rest_framework_jwt.settings import api_settings
+from rest_framework import status
+from rest_framework.views import APIView
+from rest_framework.response import Response
+
+from .compat import get_user_model
+from .settings import api_settings
+from .serializers import (
+    JSONWebTokenSerializer, RefreshJSONWebTokenSerializer,
+    VerifyJSONWebTokenSerializer
+)
+
+jwt_response_payload_handler = api_settings.JWT_RESPONSE_PAYLOAD_HANDLER
 
 
-def jwt_get_secret_key(payload=None):
+class JSONWebTokenAPIView(APIView):
     """
-    For enhanced security you may want to use a secret key based on user.
-
-    This way you have an option to logout only this user if:
-        - token is compromised
-        - password is changed
-        - etc.
+    Base API View that various JWT interactions inherit from.
     """
-    if api_settings.JWT_GET_USER_SECRET_KEY:
-        User = get_user_model()  # noqa: N806
-        user = User.objects.get(pk=payload.get('user_id'))
-        key = str(api_settings.JWT_GET_USER_SECRET_KEY(user))
-        return key
-    return api_settings.JWT_SECRET_KEY
+    permission_classes = ()
+    authentication_classes = ()
+    user_model = None
 
+    def __init__(self, user_model=None, serializer_class=None, **kwargs):
+        self.user_model = get_user_model(user_model or self.user_model)
+        self.serializer_class = serializer_class or self.serializer_class
+        super(JSONWebTokenAPIView, self).__init__(**kwargs)
 
-def jwt_payload_handler(user):
-    username_field = get_username_field()
-    username = get_username(user)
-
-    warnings.warn(
-        'The following fields will be removed in the future: '
-        '`email` and `user_id`. ',
-        DeprecationWarning
-    )
-
-    payload = {
-        'user_id': user.pk,
-        'username': username,
-        'exp': datetime.utcnow() + api_settings.JWT_EXPIRATION_DELTA
-    }
-    if hasattr(user, 'email'):
-        payload['email'] = user.email
-    if isinstance(user.pk, uuid.UUID):
-        payload['user_id'] = str(user.pk)
-
-    payload[username_field] = username
-
-    # Include original issued at time for a brand new token,
-    # to allow token refresh
-    if api_settings.JWT_ALLOW_REFRESH:
-        payload['orig_iat'] = timegm(
-            datetime.utcnow().utctimetuple()
-        )
-
-    if api_settings.JWT_AUDIENCE is not None:
-        payload['aud'] = api_settings.JWT_AUDIENCE
-
-    if api_settings.JWT_ISSUER is not None:
-        payload['iss'] = api_settings.JWT_ISSUER
-
-    return payload
-
-
-def jwt_get_user_id_from_payload_handler(payload):
-    """
-    Override this function if user_id is formatted differently in payload
-    """
-    warnings.warn(
-        'The following will be removed in the future. '
-        'Use `JWT_PAYLOAD_GET_USERNAME_HANDLER` instead.',
-        DeprecationWarning
-    )
-
-    return payload.get('user_id')
-
-
-def jwt_get_username_from_payload_handler(payload):
-    """
-    Override this function if username is formatted differently in payload
-    """
-    return payload.get('username')
-
-
-def jwt_encode_handler(payload):
-    key = api_settings.JWT_PRIVATE_KEY or jwt_get_secret_key(payload)
-    return jwt.encode(
-        payload,
-        key,
-        api_settings.JWT_ALGORITHM
-    ).decode('utf-8')
-
-
-def jwt_decode_handler(token, verify_expiration=None):
-    if verify_expiration is None:
-        verify_expiration = api_settings.JWT_VERIFY_EXPIRATION
-
-    options = {
-        'verify_exp': verify_expiration,
-    }
-    # get user from token, BEFORE verification, to get user secret key
-    unverified_payload = jwt.decode(token, None, False)
-    secret_key = jwt_get_secret_key(unverified_payload)
-    return jwt.decode(
-        token,
-        api_settings.JWT_PUBLIC_KEY or secret_key,
-        api_settings.JWT_VERIFY,
-        options=options,
-        leeway=api_settings.JWT_LEEWAY,
-        audience=api_settings.JWT_AUDIENCE,
-        issuer=api_settings.JWT_ISSUER,
-        algorithms=[api_settings.JWT_ALGORITHM]
-    )
-
-
-def jwt_response_payload_handler(token, user=None, request=None):
-    """
-    Returns the response data for both the login and refresh views.
-    Override to return a custom response such as including the
-    serialized representation of the User.
-
-    Example:
-
-    def jwt_response_payload_handler(token, user=None, request=None):
+    def get_serializer_context(self):
+        """
+        Extra context provided to the serializer class.
+        """
         return {
-            'token': token,
-            'user': UserSerializer(user, context={'request': request}).data
+            'request': self.request,
+            'view': self,
         }
 
+    def get_serializer_class(self):
+        """
+        Return the class to use for the serializer.
+        Defaults to using `self.serializer_class`.
+        You may want to override this if you need to provide different
+        serializations depending on the incoming request.
+        (Eg. admins get full serialization, others get basic serialization)
+        """
+        assert self.serializer_class is not None, (
+            "'%s' should either include a `serializer_class` attribute, "
+            "or override the `get_serializer_class()` method."
+            % self.__class__.__name__)
+        return self.serializer_class
+
+    def get_serializer(self, *args, **kwargs):
+        """
+        Return the serializer instance that should be used for validating and
+        deserializing input, and for serializing output.
+        """
+        serializer_class = self.get_serializer_class()
+        kwargs['context'] = self.get_serializer_context()
+        return serializer_class(*args, **kwargs)
+
+    def post(self, request, *args, **kwargs):
+        serializer = self.get_serializer(data=request.data)
+
+        if serializer.is_valid():
+            user = serializer.object.get('user') or request.user
+            token = serializer.object.get('token')
+            response_data = jwt_response_payload_handler(token, user, request)
+            response = Response(response_data)
+            if api_settings.JWT_AUTH_COOKIE:
+                expiration = (datetime.utcnow() +
+                              api_settings.JWT_EXPIRATION_DELTA)
+                response.set_cookie(api_settings.JWT_AUTH_COOKIE,
+                                    token,
+                                    expires=expiration,
+                                    httponly=True)
+            return response
+
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+
+class ObtainJSONWebToken(JSONWebTokenAPIView):
     """
-    return {
-        'token': token
-    }
+    API View that receives a POST with a user's username and password.
+
+    Returns a JSON Web Token that can be used for authenticated requests.
+    """
+    serializer_class = JSONWebTokenSerializer
+
+
+class VerifyJSONWebToken(JSONWebTokenAPIView):
+    """
+    API View that checks the veracity of a token, returning the token if it
+    is valid.
+    """
+    serializer_class = VerifyJSONWebTokenSerializer
+
+
+class RefreshJSONWebToken(JSONWebTokenAPIView):
+    """
+    API View that returns a refreshed token (with new expiration) based on
+    existing token
+
+    If 'orig_iat' field (original issued-at-time) is found, will first check
+    if it's within expiration window, then copy it to the new token
+    """
+    serializer_class = RefreshJSONWebTokenSerializer
+
+
+obtain_jwt_token = ObtainJSONWebToken.as_view()
+refresh_jwt_token = RefreshJSONWebToken.as_view()
+verify_jwt_token = VerifyJSONWebToken.as_view()

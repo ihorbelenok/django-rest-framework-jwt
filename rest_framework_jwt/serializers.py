@@ -81,7 +81,7 @@ class VerificationBaseSerializer(Serializer):
         msg = 'Please define a validate method.'
         raise NotImplementedError(msg)
 
-    def _check_payload(self, token, verify_expiration=True):
+    def _check_payload(self, token):
         # Check payload valid (based off of JSONWebTokenAuthentication,
         # may want to refactor)
         try:
@@ -159,7 +159,8 @@ class RefreshJSONWebTokenSerializer(VerificationBaseSerializer):
             now_timestamp = timegm(datetime.utcnow().utctimetuple())
 
             if now_timestamp > expiration_timestamp:
-                msg = _('Refresh has expired.')
+                msg = _('Refresh has expired. Now: {0}, Exp: {1}').format(
+                    now_timestamp, expiration_timestamp)
                 raise serializers.ValidationError(msg)
         else:
             msg = _('orig_iat field is required.')

@@ -85,7 +85,6 @@ class VerificationBaseSerializer(Serializer):
         # Check payload valid (based off of JSONWebTokenAuthentication,
         # may want to refactor)
         try:
-            payload = jwt_decode_handler(token, self.user_model)
             payload = jwt_decode_handler(
                 token,
                 self.user_model,

@@ -81,11 +81,16 @@ class VerificationBaseSerializer(Serializer):
         msg = 'Please define a validate method.'
         raise NotImplementedError(msg)
 
-    def _check_payload(self, token):
+    def _check_payload(self, token, verify_expiration=True):
         # Check payload valid (based off of JSONWebTokenAuthentication,
         # may want to refactor)
         try:
             payload = jwt_decode_handler(token, self.user_model)
+            payload = jwt_decode_handler(
+                token,
+                self.user_model,
+                verify_expiration=verify_expiration
+            )
         except jwt.ExpiredSignature:
             msg = _('Signature has expired.')
             raise serializers.ValidationError(msg)
@@ -140,7 +145,7 @@ class RefreshJSONWebTokenSerializer(VerificationBaseSerializer):
     def validate(self, attrs):
         token = attrs['token']
 
-        payload = self._check_payload(token=token)
+        payload = self._check_payload(token=token, verify_expiration=False)
         user = self._check_user(payload=payload)
         # Get and check 'orig_iat'
         orig_iat = payload.get('orig_iat')
@@ -151,16 +156,13 @@ class RefreshJSONWebTokenSerializer(VerificationBaseSerializer):
 
             if isinstance(refresh_limit, timedelta):
                 refresh_limit = (refresh_limit.days * 24 * 3600 +
-                                 refresh_limit.hours * 3600 +
-                                 refresh_limit.minutes * 60 +
                                  refresh_limit.seconds)
 
             expiration_timestamp = orig_iat + int(refresh_limit)
             now_timestamp = timegm(datetime.utcnow().utctimetuple())
 
             if now_timestamp > expiration_timestamp:
-                msg = _('Refresh has expired. Now: {0}, Exp: {1}').format(
-                    now_timestamp, expiration_timestamp)
+                msg = _('Refresh has expired.')
                 raise serializers.ValidationError(msg)
         else:
             msg = _('orig_iat field is required.')
